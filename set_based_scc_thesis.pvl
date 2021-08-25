@@ -1,0 +1,484 @@
+// Partly based on NDFS proof: https://github.com/wytseoortwijn/SupplementaryMaterialsThesis (accessed 20-05-2021)
+
+/* Sequential set-based SCC */
+
+class SB {
+
+    /* -------------------------------------------------------------------------------------------------------------- */
+    /* ------------------------------------------------------------------------------------------------- Global State */
+
+    int N;                      // Size of graph
+    seq<seq<boolean>> G;        // Adjacency matrix of graph
+    seq<int> S;                 // Union-find structure
+    seq<int> R;                 // Stack of roots
+    set<int> Explored;          // Set of explored states
+    set<int> Visited;           // Set of visited states
+
+
+    /* -------------------------------------------------------------------------------------------------------------- */
+    /* --------------------------------------------------------------------------------------------- Helper functions */
+
+    static pure boolean range(int x, int lower, int upper) = lower <= x && x < upper;
+
+    static inline pure boolean disjoint(set<int> P, set<int> Q) = P - Q == P;
+
+    // Range Up to N (ru) and Range Up to and Including N (rui)
+    static inline pure boolean ru(int x, int N) = 0 <= x && x < N;
+    static inline pure boolean rui(int x, int N) = 0 <= x && x <= N;
+
+
+    /* -------------------------------------------------------------------------------------------------------------- */
+    /* -------------------------------------------------------------------------------------------------------- Stack */
+
+    // determines whether R is a valid stack, represented by a sequence                                            Stack
+    static inline pure boolean Stack (int N, seq<int> R) =
+        (\forall int i; 0 <= i && i < |R|; (\forall int j; i < j && j < |R|; R[i] != R[j])) &&
+        (\forall int i; i in R; ru(i, N));
+
+    // pushes state v to the stack R                                                                                push
+    requires ru(v, N);
+    requires !(v in R);
+    requires Stack(N, R);
+    ensures v in \result;
+    ensures Stack(N, \result);
+    ensures |\result| > 0;
+    ensures \result == R ++ v;
+    static pure seq<int> push(int N, seq<int> R, int v) =
+        R ++ v;
+
+    // returns and removes last state (highest index) of/from R                                                      pop
+    requires Stack(N, R);
+    requires |R| > 0 && R[|R| - 1] in R;
+    ensures getSnd(\result) == R[|R| - 1];
+    ensures 0 <= getSnd(\result) && getSnd(\result) < N;
+    ensures (\forall int x; {:x in getFst(\result):}; x in R);
+    ensures getFst(\result) == R[0..|R| - 1];
+    ensures Stack(N, getFst(\result));
+    static pure tuple<seq<int>, int> pop(int N, seq<int> R) =
+        tuple<seq<int>, int> {R[0..|R| - 1], R[|R| - 1]};
+
+    // top(N, R); returns last state (highest index) of R (peeks at top of R)                                        top
+    requires Stack(N, R);  // R is a valid stack
+    requires |R| > 0 && R[|R| - 1] in R;
+    ensures \result == R[|R| - 1];  // the returned/peeked state is the last state from R
+    ensures 0 <= \result && \result < N;
+    static pure int top(int N, seq<int> R) =
+       R[|R| - 1];
+
+
+    /* -------------------------------------------------------------------------------------------------------------- */
+    /* --------------------------------------------------------------------------------------------------- Union-find */
+
+    // determines whether S is a valid union-find                                                              UnionFind
+    static inline pure boolean UnionFind(int N, seq<int> S) =
+        |S| == N &&  // size constraint on S
+        (\forall int i; ru(i, N); ru(S[i], N));  // bounds on elements of S
+
+    // key invariant for the union-find data structure (unused)                                              UFInvariant
+    requires UnionFind(N, S);
+    static inline pure boolean UFInvariant(int N, seq<int> S) =
+        (\forall int v; 0 <= v && v < N; (\forall int w; 0 <= w && w < N;
+            (w in part(N, S, v)) == (part(N, S, v) == part(N, S, w))));
+
+    // finds the representative of v in S                                                                            rep
+    requires ru(v, N);
+    requires UnionFind(N, S);
+    ensures ru(\result, N);
+    ensures S[\result] == \result;
+    static pure int rep(int N, seq<int> S, int v) =
+        S[v] == v ? v : rep(N, S, S[v]);
+
+    // unites the partitions containing v and w                                                                    unite
+    requires ru(v, N);
+    requires ru(w, N);
+    requires UnionFind(N, S);
+    ensures \result == S[SB.rep(N, S, w) -> SB.rep(N, S, v)];
+    ensures UnionFind(N, \result);
+    // lemma 7 and lemma 8, resp.:
+    ensures (\forall int i; ru(i, N) && rep(N, S, w) == {:rep(N, S, i):}; rep(N, \result, i) == rep(N, S, v));
+    ensures (\forall int i; ru(i, N) && rep(N, S, w) != {:rep(N, S, i):}; rep(N, \result, i) == rep(N, S, i));
+    static seq<int> unite(int N, seq<int> S, int v, int w) {
+        seq<int> T = S[SB.rep(N, S, w) -> SB.rep(N, S, v)];
+        if (rep(N, S, w) == rep(N, S, v)) {
+            assert T == S;  // Trivial case
+        } else {
+            lemma_7_uf(N, S, T, v, w);
+            lemma_8_uf(N, S, T, v, w);
+        }
+        return T;
+    }
+
+    // finds the partition in S that v is in                                                                        part
+    requires 0 <= v && v < N;
+    requires UnionFind(N, S);
+    ensures (\forall int i; 0 <= i && i < N && rep(N, S, i) == rep(N, S, v); i in \result);
+    ensures (\forall int i; i in \result; 0 <= i && i < N && rep(N, S, i) == rep(N, S, v));
+    static pure set<int> part(int N, seq<int> S, int v) =
+        setCompPart(N, S, v);
+    // This is a workaround function that replaces the following set comprehension expression:
+    // set<int> {i | int i, int N1 <- [N], seq<int> S1 <- [S}, int v1 <- [v];
+    //               0 <= i && i < N1 && SB.rep(N1, S1, i) == SB.rep(N1, S1, v1)}
+    // However, S1 will not carry over the properties of S (for example, UnionFind(N, S1)), which is needed for
+    // rep(N1, S1, i) and rep(N1, S1, v1) to be proven.
+    requires 0 <= v && v < N;
+    requires UnionFind(N, S);
+    ensures (\forall int i; 0 <= i && i < N && rep(N, S, i) == rep(N, S, v); i in \result);
+    ensures (\forall int i; i in \result; 0 <= i && i < N && rep(N, S, i) == rep(N, S, v));
+    static pure set<int> setCompPart(int N, seq<int> S, int v);
+
+
+    /* -------------------------------------------------------------------------------------------------------------- */
+    /* --------------------------------------------------------------------------------------------- Graph Properties */
+
+    // determines whether C is a component in a graph with size N                                              Component
+    static inline pure boolean Component(int N, set<int> C) =
+        (\forall int x; x in C; 0 <= x && x < N);
+
+    // determines whether C is a component of at least size 1                                          NonEmptyComponent
+    static inline pure boolean NonEmptyComponent(int N, set<int> C) =
+        Component(N, C) && |C| > 0;
+
+    // determines whether G is an adjacency matrix of size N                                             AdjacencyMatrix
+    static inline pure boolean AdjacencyMatrix(int N, seq<seq<boolean>> G) =
+        |G| == N && (\forall seq<boolean> e; e in G; |e| == N);
+
+
+    /* -------------------------------------------------------------------------------------------------------------- */
+    /* ----------------------------------------------------------------------------------------- Algorithm Properties */
+
+    // defines the set of all states V(N)                                                                           V(N)
+    ensures (\forall int j; j in \result; range(j, 0, N));
+    ensures (\forall int j; range(j, 0, N); j in \result);
+    static pure set<int> V(int N); //=
+        //set<int> {i | int i, int N <- [N]; SB.range(i, 0, N)};
+
+    // defines the Unseen() set                                                                                 Unseen()
+    requires Perm(N, 1\2) ** Perm(Visited, 1\2);
+    pure inline set<int> Unseen() =
+        V(N) - Visited;
+
+    // defines the Visited() set                                                                               Visited()
+    requires Perm(Visited, 1\2) ** Perm(Explored, 1\2);
+    pure inline set<int> Live() =
+        Visited - Explored;
+
+
+    /* -------------------------------------------------------------------------------------------------------------- */
+    /* -------------------------------------------------------------------------------------------------------- Paths */
+
+    // determines whether P is a path from x to y in the graph G.                                                   Path
+    requires AdjacencyMatrix(N, G);
+    static pure boolean Path(int N, seq<seq<boolean>> G, int x, int y, seq<int> P) =
+        0 <= x && x < N && 0 <= y && y < N &&
+        0 < |P| && P[0] == x && P[|P| - 1] == y &&
+        (\forall int j; 0 <= j && j < |P|; 0 <= P[j] && P[j] < N) &&
+        (\forall int j; 0 <= j && j < |P| - 1; G[P[j]][P[j + 1]]);
+
+    // existential quantification over paths in G of length at least len.                                         ExPath
+    requires AdjacencyMatrix(N, G);
+    static pure boolean ExPath(int N, seq<seq<boolean>> G, int x, int y, int len) =
+        (\exists seq<int> P; len <= |P|; Path(N, G, x, y, P));
+
+    // determines whether P is a path from x to y in the graph G visiting only states in C.                  FittingPath
+    requires AdjacencyMatrix(N, G);
+    static pure boolean FittingPath(int N, seq<seq<boolean>> G, int x, int y, seq<int> P, set<int> C) =
+        Path(N, G, x, y, P) &&
+        (\forall int v; v in P; v in C);
+
+    // existential quantification over fitting paths in G of length at least len.                          ExFittingPath
+    requires AdjacencyMatrix(N, G);
+    static pure boolean ExFittingPath(int N, seq<seq<boolean>> G, int x, int y, int len, set<int> C) =
+        (\exists seq<int> P; len <= |P|; FittingPath(N, G, x, y, P, C));
+
+    // determines whether P is a path from x to y in the sequence S.                                             SeqPath
+    requires UnionFind(N, S);
+    static pure boolean SeqPath(int N, seq<int> S, int x, int y, seq<int> P) =
+        0 <= x && x < N && 0 <= y && y < N &&
+        0 < |P| && P[0] == x && P[|P| - 1] == y &&
+        (\forall int j; 0 <= j && j < |P|; 0 <= P[j] && P[j] < N) &&
+        (\forall int j; 0 <= j && j < |P| - 1; S[P[j]] == P[j + 1]);
+
+    // existential quantification over paths in S of length at least len.                                      ExSeqPath
+    requires UnionFind(N, S);
+    static pure boolean ExSeqPath(int N, seq<int> S, int x, int y, int len) =
+        (\exists seq<int> P; len <= |P|; SeqPath(N, S, x, y, P));
+
+    // defines how a path from x to y is built if it exists.                                                  getSeqPath
+    requires UnionFind(N, S);
+    requires ExSeqPath(N, S, x, y, 2);
+    ensures SeqPath(N, S, x, y, \result);
+    ensures |\result| >= 2;
+    static seq<int> getSeqPath(int N, seq<int> S, int x, int y) {
+        if (S[x] == y) {
+            return [x, y];
+        } else {
+            assert (\forall seq<int> P; SeqPath(N, S, x, y, P) && |P| >= 2; SeqPath(N, S, S[x], y, tail(P)));
+            // Explicit assert needed (to prove ExSeqPath(N, S, S[x], y, 2))
+            return [x] + getSeqPath(N, S, S[x], y);
+        }
+    }
+
+
+    /* -------------------------------------------------------------------------------------------------------------- */
+    /* --------------------------------------------------------------------------------------------------------- SCCs */
+
+    // defines a partial SCC                                                                                        PSCC
+    requires AdjacencyMatrix(N, G);
+    static pure boolean PSCC(int N, seq<seq<boolean>> G, set<int> C) =
+        (\forall int v; v in C; (\forall int w; w in C && w != v; ExPath(N, G, v, w, 1) &&
+                                                                  ExPath(N, G, w, v, 1)));
+    // defines a fitting SCC                                                                                        FSCC
+    requires AdjacencyMatrix(N, G);
+    static pure boolean FSCC(int N, seq<seq<boolean>> G, set<int> C) =
+        (\forall int v; v in C; (\forall int w; w in C && w != v; ExFittingPath(N, G, v, w, 1, C) &&
+                                                                  ExFittingPath(N, G, w, v, 1, C)));
+    // defines a maximal SCC                                                                                         SCC
+    requires AdjacencyMatrix(N, G);
+    static pure boolean SCC(int N, seq<seq<boolean>> G, set<int> C) =
+        FSCC(N, G, C) &&
+        (\forall set<int> Cp; NonEmptyComponent(N, Cp) && FSCC(N, G, Cp) && Cp != C; !(\forall int i; i in C; i in Cp));
+
+
+    /* -------------------------------------------------------------------------------------------------------------- */
+    /* ------------------------------------------------------------------------------------------------------- Lemmas */
+
+    // Lemma 7 - Given union-find S and sequence T, where T == S[SB.rep(N, S, w) -> SB.rep(N, S, v)], then
+    //           (\forall int i; ru(i, N) && rep(N, S, w) == rep(N, S, i); rep(N, T, i) == rep(N, S, v)).
+    //           (Proof by exhaustive contradiction)
+    requires ru(v, N);
+    requires ru(w, N);
+    requires UnionFind(N, S);
+    requires T == S[SB.rep(N, S, w) -> SB.rep(N, S, v)];
+    ensures (\forall int i; ru(i, N) && rep(N, S, w) == rep(N, S, i); rep(N, T, i) == rep(N, S, v));
+    static void lemma_7_uf(int N, seq<int> S, seq<int> T, int v, int w) {
+        int x = 0;
+
+        loop_invariant rui(x, N);
+        loop_invariant (\forall int i; ru(i, x) && rep(N, S, w) == rep(N, S, i); rep(N, T, i) == rep(N, S, v));
+        while (x < N) {
+            if (rep(N, S, w) == rep(N, S, x)) {
+                if (rep(N, T, x) == rep(N, S, v)) {
+                    // OK
+                } else {
+                    // rep(N, T, x) != rep(N, S, v)
+                    // Assertion: rep(N, T, x) != rep(N, S, v)
+                    // Contradiction: rep(N, T, x) == rep(N, S, v)
+
+                    int y;
+                    seq<int> P;
+
+                    lemma_9_uf(N, S, x) with {P = P;};  // ExSeqPath(N, S, x, rep(N, S, x), 2) and |P| >= 2
+
+                    y = 0;
+                    // SeqPath(N, T, x, P[y], P[0..(y + 1)])
+                    loop_invariant 0 <= y && y < |P|;
+                    loop_invariant (\forall int z; z in P[0..y]; S[z] == T[z]);
+                    loop_invariant SeqPath(N, T, x, P[y], P[0..(y + 1)]);
+                    while (P[y] != rep(N, S, w)) {
+                        y++;
+                    }
+
+                    // because T[rep(N, S, w)] == rep(N, S, v)
+                    assert SeqPath(N, T, x, rep(N, S, v), P[0..(y + 1)] + [rep(N, S, v)]);  // Explicit witness
+                    lemma_10_uf(N, T, x, rep(N, S, v));  // rep(N, T, x) == rep(N, S, v)
+
+                    assert false;
+                }
+            }
+        }
+    }
+
+    // Lemma 8 - Given union-find S and sequence T, where T == S[SB.rep(N, S, w) -> SB.rep(N, S, v)], then
+    //           (\forall int i; ru(i, N) && rep(N, S, w) != rep(N, S, i); rep(N, T, i) == rep(N, S, i)).
+    //           (Proof by exhaustive contradiction)
+    requires ru(v, N);
+    requires ru(w, N);
+    requires UnionFind(N, S);
+    requires T == S[SB.rep(N, S, w) -> SB.rep(N, S, v)];
+    ensures (\forall int i; ru(i, N) && rep(N, S, w) != rep(N, S, i); rep(N, T, i) == rep(N, S, i));
+    static void lemma_8_uf(int N, seq<int> S, seq<int> T, int v, int w) {
+        int x = 0;
+
+        loop_invariant rui(x, N);
+        loop_invariant (\forall int i; ru(i, x) && rep(N, S, w) != rep(N, S, i); rep(N, T, i) == rep(N, S, i));
+        while (x < N) {
+            if (rep(N, S, w) != rep(N, S, x)) {
+                if (rep(N, T, x) == rep(N, S, x)) {
+                    // OK
+                } else {
+                    // rep(N, T, x) != rep(N, S, x)
+                    // Assertion: rep(N, T, x) != rep(N, S, x)
+                    // Contradiction: rep(N, T, x) == rep(N, S, x)
+
+                    int y;
+                    seq<int> P;
+
+                    lemma_9_uf(N, S, x) with {P = P;};  // ExSeqPath(N, S, x, rep(N, S, x), 2) and |P| >= 2
+                    lemma_11_uf(N, S, x, P);  // (\forall int i; i in P; rep(N, S, i) == rep(N, S, x))
+                    assert (\forall int i; 0 <= i && i < |P|; (\forall int j; j in P[0..i]; j in P));  // Explicit
+                                                                                              // assert needed (lemma 9)
+                    y = 0;
+                    // SeqPath(N, T, x, P[y], P[0..(y + 1)])
+                    loop_invariant 0 <= y && y < |P|;
+                    loop_invariant (\forall int z; z in P[0..y]; S[z] == T[z]);
+                    loop_invariant SeqPath(N, T, x, P[y], P[0..(y + 1)]);
+                    while (P[y] != rep(N, S, x)) {
+                        y++;
+                    }
+
+                    lemma_10_uf(N, T, x, rep(N, S, x));  // rep(N, T, x) == rep(N, S, x)
+
+                    assert false;
+                }
+            }
+        }
+    }
+
+    // Lemma 9 - Given a union-find S and a state v, then there exists a path from v to the representative of v in S,
+    //           rep(N, S, v). (Proof by induction)
+    yields seq<int> P;
+    requires ru(v, N);
+    requires UnionFind(N, S);
+    ensures SeqPath(N, S, v, rep(N, S, v), P) && |P| >= 2;
+    ensures ExSeqPath(N, S, v, rep(N, S, v), 2);
+    static void lemma_9_uf(int N, seq<int> S, int v) {
+        if (S[v] == v) {
+            // Base case: P = [v];
+            P = [v, v];
+        } else {
+            // S[v] != v
+            // Induction hypothesis: ExSeqPath(N, S, S[v], rep(N, S, S[v]), 1)
+            lemma_9_uf(N, S, S[v]) with {P = P;};
+            P = [v] + P;
+
+        }
+    }
+
+    // Lemma 10 - Given a sequence S and states v and r, where S[r] == r and there exists a path from v to r, then
+    //            the representative of v in S, rep(N, S, v), is equal to r. (Proof by contradiction)
+    requires ru(v, N) && ru(r, N);
+    requires UnionFind(N, S);
+    requires S[r] == r;
+    requires ExSeqPath(N, S, v, r, 2);
+    ensures rep(N, S, v) == r;
+    static void lemma_10_uf(int N, seq<int> S, int v, int r) {
+        if (rep(N, S, v) == r) {
+            // OK
+        } else {
+            // rep(N, S, v) != r
+            // Assertion: rep(N, S, r) == r (property of both rep() and UnionFind())
+            // Contradiction: rep(N, S, r) != r (by deconstructing the path from v to r)
+            int w = v;
+            loop_invariant ru(w, N);
+            loop_invariant rep(N, S, w) != r;
+            while (w != r) { w = S[w]; }
+            assert false;
+        }
+    }
+
+    // Lemma 11 - Given a union-find S, a state v and a path P from v to rep(N, S, v), then all states in P also have
+    //            the representative of v as representative in S. (Proof by induction)
+    requires ru(v, N);
+    requires UnionFind(N, S);
+    requires SeqPath(N, S, v, rep(N, S, v), P) && |P| >= 2;
+    ensures (\forall int i; i in P; rep(N, S, i) == rep(N, S, v));
+    static void lemma_11_uf(int N, seq<int> S, int v, seq<int> P) {
+        if (|P| == 2) {
+            // Base case: v == rep(N, S, v)
+        } else {
+            // |P| > 2
+            // Induction hypothesis: (\forall int i; i in tail(P); rep(N, S, i) == rep(N, S, S[v]))
+            lemma_11_uf(N, S, S[v], tail(P));
+            assert P == [v] + tail(P);  // Explicit assert needed
+        }
+    }
+
+
+    /* -------------------------------------------------------------------------------------------------------------- */
+    /* ------------------------------------------------------------------------------------------------ Set-based SCC */
+
+
+    // - basic context_everywhere - \\
+    context_everywhere Perm(N, 1\2) ** Perm(G, 1\2) ** Perm (S, 1) ** Perm(R, 1) **
+                       Perm(Explored, 1) ** Perm(Visited, 1);  // Permissions for global state
+    context_everywhere 0 < N && AdjacencyMatrix(N, G) && UnionFind(N, S) && Stack(N, R)
+                       && Component(N, Explored) && Component(N, Visited);  // Constraints on global state
+    // ------ basic requires ------ \\
+    requires 0 <= v && v < N;  // Constraints on v
+    requires !(v in Visited); // v is not yet visited
+    requires !(v in Explored); // v is not yet explored
+    requires !(v in R); // v is not yet on the stack
+    // ------ basic ensures ------- \\
+    ensures N == \old(N); // N is unchanged
+    ensures (\forall int x; x in \old(Visited); x in Visited);  // Visited is strictly increasing
+    ensures (\forall int x; x in \old(Explored); x in Explored);  // Explored is strictly increasing
+
+    // ---- context_everywhere ---- \\
+    context_everywhere (\forall int x; x in R; x in Visited);  // R is a subset of Visited
+    context_everywhere (\forall int x; x in Unseen(); part(N, S, x) == {x});  // All x in Unseen() are their own rep.
+    context_everywhere (\forall int x; x in R; x == rep(N, S, x));  // All x in R are representatives
+    context_everywhere (\forall int x; x in Live(); rep(N, S, x) in R);  // All x in Live() have their rep. in R
+    // The two above invariants express the following:
+    //      1. All supernodes for the states in R are disjoint and together contain all Live() states. All supernodes
+    //         are disjoint because a supernode cannot have two representatives. The supernodes of the representatives
+    //         on R contain all Live() states because the representatives of all Live() states are in R.
+    //      2. All Live() states have a unique representation on R (namely its representative)
+
+    // ---------- ensures --------- \\
+    // ensures (\forall int x; x in Explored; SCC(part(N, S, x)));  // Potential correctness postcondition
+    void SetBased(int v) {
+
+        Visited = Visited + set<int> {v};
+        R = push(N, R, v);
+
+        int w = 0;
+
+        // --- basic loop_invariant -- \\
+        loop_invariant 0 <= v && v < N;
+        loop_invariant 0 <= w && w <= N;
+        loop_invariant N == \old(N);
+        loop_invariant (\forall int x; x in \old(Visited); x in Visited);
+        loop_invariant (\forall int x; x in \old(Explored); x in Explored);
+        while (w < N) {
+            if (G[v][w]) {
+                if (!(w in Explored)) {
+                    if (!(w in Visited)) {
+
+                        SetBased(w);
+
+                    } else {
+
+                        // --- basic loop_invariant -- \\
+                        loop_invariant 0 <= v && v < N;
+                        loop_invariant 0 <= w && w < N;
+                        loop_invariant N == \old(N);
+                        loop_invariant (\forall int x; x in \old(Visited); x in Visited);
+                        loop_invariant (\forall int x; x in \old(Explored); x in Explored);
+                        loop_invariant w in Live();
+                        while (part(N, S, v) != part(N, S, w)) {
+
+                            assume v in Live();  // Assumption, was yet not able to verify
+
+                            tuple<seq<int>, int> t = pop(N, R); R = getFst(t); int r = getSnd(t);
+
+                            S = unite(N, S, top(N, R), r);
+
+                        }
+                    }
+                }
+            }
+            w++;
+        }
+
+        if (|R| > 0) {  // precondition for top (NB if |R| <= 0 then v == top(N, R) never holds)
+            if (v == top(N, R)) {
+
+                Explored = Explored + part(N, S, v);
+                assert (\forall int x; x in Live(); rep(N, S, x) in R);  // Explicit assert needed
+                tuple<seq<int>, int> t = pop(N, R); R = getFst(t);
+
+            }
+        }
+    }
+
+}
